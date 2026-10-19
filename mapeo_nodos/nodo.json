@@ -1,0 +1,13 @@
+{
+    "nodo":[
+        {
+        "id": "1",
+        "nombre": "Entrada Polideportivo"
+        "latitude": 40.456,
+        "longitude": -69.999,
+        "Altitud":100.0
+        "radio":10.0
+        "datos":{"tipo":"entrada","descricpción":"Bienvenido a la Universidad de El Salvador"}
+    }
+]
+}
