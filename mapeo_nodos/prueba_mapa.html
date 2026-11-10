@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1.0" />
+
+  <title>Prueba de mapa UES</title>
+
+  <link
+    href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
+    rel="stylesheet"
+  />
+
+  <style>
+    body {
+      margin: 0;
+    }
+
+    #mapa {
+      width: 100%;
+      height: 100vh;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="mapa"></div>
+
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+
+  <script>
+    const mapa = new maplibregl.Map({
+      container: "mapa",
+
+      // Mapa base público de OpenFreeMap.
+      style: "https://tiles.openfreemap.org/styles/liberty",
+
+      // Centro aproximado de la sede central de la UES.
+      // El orden es: longitud, latitud.
+      center: [-89.203, 13.718],
+
+      zoom: 16,
+      pitch: 45,
+      bearing: 0
+    });
+
+    // Botones para acercar, alejar y orientar el mapa.
+    mapa.addControl(
+      new maplibregl.NavigationControl(),
+      "top-right"
+    );
+    mapa.on("load", () => {
+  mapa.addSource("edificio-prueba", {
+    type: "geojson",
+    data: {
+      type: "Feature",
+      properties: {
+        altura: 18
+      },
+      geometry: {
+        type: "Polygon",
+        coordinates: [[
+          [-89.20308, 13.71795],
+          [-89.20292, 13.71795],
+          [-89.20292, 13.71805],
+          [-89.20308, 13.71805],
+          [-89.20308, 13.71795]
+        ]]
+      }
+    }
+  });
+
+  mapa.addLayer({
+    id: "edificio-prueba-3d",
+    type: "fill-extrusion",
+    source: "edificio-prueba",
+    paint: {
+      "fill-extrusion-color": "#e07832",
+      "fill-extrusion-height": ["get", "altura"],
+      "fill-extrusion-base": 0,
+      "fill-extrusion-opacity": 0.9
+    }
+  });
+
+  mapa.easeTo({
+    zoom: 17.5,
+    pitch: 60
+  });
+});
+  </script>
+</body>
+</html>

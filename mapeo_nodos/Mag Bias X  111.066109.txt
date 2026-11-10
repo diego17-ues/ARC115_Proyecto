@@ -1,0 +1,6 @@
+Mag Bias X:  111.066109
+Mag Bias Y:  238.789505
+Mag Bias Z:  -47.558762
+Mag Scale X: 1.504505
+Mag Scale Y: 0.700210
+Mag Scale Z: 1.102310
