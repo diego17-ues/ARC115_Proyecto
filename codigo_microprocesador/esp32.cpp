@@ -8,25 +8,28 @@
 #include <MPU9250.h> // Instalar: "MPU9250 by Hideaki Tai"
 
 // --- Configuración de Pines ---
-#define BUZZER_PIN 15    
-#define GPS_RX_PIN 16        
-#define GPS_TX_PIN 17        
-#define I2C_SDA 21           
-#define I2C_SCL 22           
+#define BUZZER_PIN 15
+#define GPS_RX_PIN 16
+#define GPS_TX_PIN 17
+#define I2C_SDA 21
+#define I2C_SCL 22
 
-#define UMBRAL_DISTANCIA 3.0 
+#define UMBRAL_DISTANCIA 3.0
 
-HardwareSerial gpsSerial(2); 
+// Si al girar en sentido horario el yaw BAJA, cambia a -1.0f
+#define SIGNO_YAW 1.0f
+
+HardwareSerial gpsSerial(2);
 TinyGPSPlus gps;
 BluetoothSerial SerialBT;
 MPU9250 mpu;
 
 // --- Máquina de Estados ---
-enum EstadoSistema { INICIANDO, ESPERANDO_GPS, MODO_APP, MODO_RUTA_DEFECTO };
+enum EstadoSistema { INICIANDO, ESPERANDO_GPS, MODO_APP, MODO_RUTA_DEFECTO, RUTA_FINALIZADA };
 EstadoSistema estadoActual = INICIANDO;
 
 // --- Variables de Ruta ---
-const int ruta_ida[] = {1, 2, 3}; // IDs a buscar en el archivo nodos.json
+const int ruta_ida[] = {1, 2, 3};
 const int total_nodos_ida = sizeof(ruta_ida) / sizeof(ruta_ida[0]);
 int indice_ruta = 0;
 
@@ -34,21 +37,72 @@ double lat_objetivo = 0.0;
 double lon_objetivo = 0.0;
 bool nodo_cargado = false;
 
-// --- Temporizadores No Bloqueantes ---
+// --- Temporizadores de Navegación ---
 unsigned long ultimoBip = 0;
 unsigned long ultimoCalculoVelocidad = 0;
+unsigned long ultimoPrint = 0;
 double distanciaAnterior = 0.0;
 
-// --- Funciones de Audio (Low Level Trigger) ---
-void encenderBuzzer() {
-  digitalWrite(BUZZER_PIN, LOW);  // LOW enciende el buzzer activo
+// --- Watchdog del MPU (basado en ruido crudo del acelerómetro) ---
+float ultimaSumaAcc = 0.0;
+unsigned long tUltimoDatoVivo = 0;
+
+// --- Rumbo filtrado y fusión con GPS ---
+float filtroSx = 0.0f, filtroSy = 0.0f;
+bool filtroInicializado = false;
+float offsetMag = 0.0f;
+
+// =====================================================================
+//  BUZZER NO BLOQUEANTE (Low Level Trigger)
+// =====================================================================
+void encenderBuzzer() { digitalWrite(BUZZER_PIN, LOW); }
+void apagarBuzzer()   { digitalWrite(BUZZER_PIN, HIGH); }
+
+// Patrones: duraciones en ms, alternando ON, OFF, ON, OFF...
+const uint16_t PAT_GPS[]   = {50};
+const uint16_t PAT_IZQ[]   = {50, 50, 50};
+const uint16_t PAT_DER[]   = {300};
+const uint16_t PAT_EXITO[] = {100, 100, 100, 100, 400};
+
+const uint16_t* patronActual = nullptr;
+uint8_t patronLen = 0;
+uint8_t patronIdx = 0;
+unsigned long patronInicio = 0;
+bool patronActivo = false;
+
+void iniciarPatron(const uint16_t* pasos, uint8_t n) {
+  patronActual = pasos;
+  patronLen = n;
+  patronIdx = 0;
+  patronInicio = millis();
+  patronActivo = true;
+  encenderBuzzer();
 }
 
-void apagarBuzzer() {
-  digitalWrite(BUZZER_PIN, HIGH); // HIGH lo apaga
+void detenerPatron() {
+  patronActivo = false;
+  apagarBuzzer();
 }
 
-// --- Carga de JSON desde LittleFS ---
+// Llamar en cada vuelta del loop
+void actualizarBuzzer() {
+  if (!patronActivo) return;
+  if (millis() - patronInicio >= patronActual[patronIdx]) {
+    patronIdx++;
+    patronInicio = millis();
+    if (patronIdx >= patronLen) {
+      detenerPatron();
+    } else if (patronIdx % 2 == 0) {
+      encenderBuzzer();
+    } else {
+      apagarBuzzer();
+    }
+  }
+}
+
+// =====================================================================
+//  CARGA DE JSON DESDE LITTLEFS
+// =====================================================================
 bool cargarNodoObjetivo(int idBuscado) {
   File file = LittleFS.open("/nodos.json", "r");
   if (!file) {
@@ -63,7 +117,7 @@ bool cargarNodoObjetivo(int idBuscado) {
 
   JsonDocument doc;
   DeserializationError error = deserializeJson(doc, file, DeserializationOption::Filter(filtro));
-  file.close(); 
+  file.close();
 
   if (error) return false;
 
@@ -79,64 +133,198 @@ bool cargarNodoObjetivo(int idBuscado) {
   return false;
 }
 
+// =====================================================================
+//  I2C
+// =====================================================================
+void destrabarI2C() {
+  Serial.println("Forzando liberación del bus I2C...");
+  pinMode(I2C_SDA, INPUT_PULLUP);
+  pinMode(I2C_SCL, INPUT_PULLUP);
+  delay(1);
+
+  if (digitalRead(I2C_SDA) == LOW) {
+    pinMode(I2C_SCL, OUTPUT);
+    for (int i = 0; i < 16; i++) {
+      digitalWrite(I2C_SCL, LOW);
+      delayMicroseconds(20);
+      digitalWrite(I2C_SCL, HIGH);
+      delayMicroseconds(20);
+    }
+  }
+  pinMode(I2C_SDA, INPUT);
+  pinMode(I2C_SCL, INPUT);
+}
+
+void iniciarI2C() {
+  Wire.begin(I2C_SDA, I2C_SCL);
+  Wire.setClock(50000);
+  Wire.setTimeOut(150);
+}
+
+// =====================================================================
+//  RUMBO: FILTRO CIRCULAR + FUSIÓN CON GPS
+// =====================================================================
+float normalizar360(float a) {
+  a = fmodf(a, 360.0f);
+  if (a < 0) a += 360.0f;
+  return a;
+}
+
+float normalizar180(float a) {
+  while (a > 180.0f) a -= 360.0f;
+  while (a < -180.0f) a += 360.0f;
+  return a;
+}
+
+// Llamar SOLO cuando mpu.update() devuelve true (tasa constante)
+void actualizarFiltroRumbo() {
+  float r = radians(SIGNO_YAW * mpu.getYaw());
+  float cx = cosf(r), cy = sinf(r);
+  if (!filtroInicializado) {
+    filtroSx = cx;
+    filtroSy = cy;
+    filtroInicializado = true;
+  } else {
+    const float alpha = 0.05f;
+    filtroSx += alpha * (cx - filtroSx);
+    filtroSy += alpha * (cy - filtroSy);
+  }
+}
+
+float rumboMagnetico() {
+  return normalizar360(degrees(atan2f(filtroSy, filtroSx)));
+}
+
+// Corrige lentamente el offset del magnetómetro con el rumbo GPS al caminar
+void fusionarConGPS() {
+  if (!gps.course.isUpdated()) return;           // solo con muestra GPS nueva
+  bool valido = gps.course.isValid() && gps.speed.isValid();
+  float vel = gps.speed.mps();
+  float curso = gps.course.deg();                // lectura limpia el flag "updated"
+  float giroZ = fabsf(mpu.getGyroZ());           // °/s
+
+  // Solo si camina, en línea recta (el curso GPS se retrasa al girar)
+  if (valido && vel > 1.0f && giroZ < 20.0f) {
+    float err = normalizar180(curso - (rumboMagnetico() + offsetMag));
+    offsetMag = normalizar180(offsetMag + 0.2f * err);
+  }
+}
+
+float rumboActual() {
+  return normalizar360(rumboMagnetico() + offsetMag);
+}
+
+bool cargarCalibracion() {
+  File f = LittleFS.open("/calib.json", "r");
+  if (!f) {
+    Serial.println("AVISO: no hay /calib.json, MPU sin calibrar");
+    return false;
+  }
+  JsonDocument doc;
+  DeserializationError e = deserializeJson(doc, f);
+  f.close();
+
+  if (e || !doc["accBias"].is<JsonArray>() || !doc["gyroBias"].is<JsonArray>() ||
+      !doc["magBias"].is<JsonArray>() || !doc["magScale"].is<JsonArray>()) {
+    Serial.println("AVISO: /calib.json invalido, MPU sin calibrar");
+    return false;
+  }
+
+  mpu.setAccBias(doc["accBias"][0].as<float>(), doc["accBias"][1].as<float>(), doc["accBias"][2].as<float>());
+  mpu.setGyroBias(doc["gyroBias"][0].as<float>(), doc["gyroBias"][1].as<float>(), doc["gyroBias"][2].as<float>());
+  mpu.setMagBias(doc["magBias"][0].as<float>(), doc["magBias"][1].as<float>(), doc["magBias"][2].as<float>());
+  mpu.setMagScale(doc["magScale"][0].as<float>(), doc["magScale"][1].as<float>(), doc["magScale"][2].as<float>());
+
+  Serial.println("Calibracion MPU cargada desde /calib.json");
+  return true;
+}
+
+bool iniciarMPU() {
+  if (!mpu.setup(0x68)) return false;
+  cargarCalibracion();
+  mpu.setMagneticDeclination(-1.0); // aproximado para San Salvador, verifica en NOAA
+  return true;
+}
+// =====================================================================
+//  SETUP
+// =====================================================================
 void setup() {
   Serial.begin(115200);
-  
-  // Inicialización de Hardware
+
   gpsSerial.begin(9600, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
-  Wire.begin(I2C_SDA, I2C_SCL);
-  
-  // Configuración del Buzzer (Low Trigger)
+  iniciarI2C();
+
   pinMode(BUZZER_PIN, OUTPUT);
-  apagarBuzzer(); // Asegurar que inicie apagado
+  apagarBuzzer();
 
   if (!LittleFS.begin()) {
     Serial.println("Error crítico: LittleFS no montado");
-    while (1); 
+    while (1);
   }
 
-  // Inicialización MPU-9250 (Dirección I2C por defecto 0x68)
-  if (!mpu.setup(0x68)) {
+  if (!iniciarMPU()) {
     Serial.println("Error crítico: MPU-9250 no encontrado");
     while (1);
   }
-  // IMPORTANTE: Antes de pruebas reales, usar mpu.calibrateMag() aquí
 
   SerialBT.begin("Navegador_UES");
-  
-  // Pitido inicial largo de confirmación de encendido
+  SerialBT.setTimeout(20); // evita bloqueo de readStringUntil
+
+  // Pitido inicial (en setup el delay es inofensivo)
   encenderBuzzer(); delay(500); apagarBuzzer();
-  
+
   estadoActual = ESPERANDO_GPS;
+  tUltimoDatoVivo = millis();
 }
 
+// =====================================================================
+//  LOOP
+// =====================================================================
 void loop() {
-  // 1. Lectura continua de sensores
+  // 1. GPS
   while (gpsSerial.available() > 0) {
     gps.encode(gpsSerial.read());
   }
+
+  // 2. MPU + watchdog basado en ruido crudo del acelerómetro
   if (mpu.update()) {
-    // El MPU se actualiza continuamente en background
+    float sumaAcc = mpu.getAccX() + mpu.getAccY() + mpu.getAccZ();
+    if (sumaAcc != ultimaSumaAcc) {  // un sensor vivo siempre tiene ruido
+      ultimaSumaAcc = sumaAcc;
+      tUltimoDatoVivo = millis();
+    }
+    actualizarFiltroRumbo();
   }
 
-  // 2. Control de Estados
+  if (millis() - tUltimoDatoVivo > 2000) {
+    Serial.println("¡CRÍTICO! MPU-9250 sin datos. Reiniciando bus I2C...");
+    Wire.end();
+    delay(10);
+    destrabarI2C();
+    iniciarI2C();
+    if (iniciarMPU()) {
+      Serial.println("MPU-9250 reiniciado con éxito.");
+      filtroInicializado = false; // el filtro del sensor se reinició
+    }
+    tUltimoDatoVivo = millis();
+  }
+
+  // 3. Buzzer no bloqueante
+  actualizarBuzzer();
+
+  // 4. Estados
   switch (estadoActual) {
-    
+
     case ESPERANDO_GPS:
-      // Bip corto cada 2s para indicar "Buscando Satélites"
       if (millis() - ultimoBip > 2000) {
-        encenderBuzzer(); delay(50); apagarBuzzer();
+        iniciarPatron(PAT_GPS, 1);
         ultimoBip = millis();
       }
 
       if (gps.location.isValid() && gps.location.isUpdated()) {
-        apagarBuzzer();
+        detenerPatron();
         Serial.println("¡Fix GPS obtenido!");
-        if (SerialBT.hasClient()) {
-          estadoActual = MODO_APP;
-        } else {
-          estadoActual = MODO_RUTA_DEFECTO;
-        }
+        estadoActual = SerialBT.hasClient() ? MODO_APP : MODO_RUTA_DEFECTO;
       }
       break;
 
@@ -148,67 +336,58 @@ void loop() {
       break;
 
     case MODO_RUTA_DEFECTO:
+      fusionarConGPS();
+
       if (!nodo_cargado) {
         if (indice_ruta < total_nodos_ida) {
           if (cargarNodoObjetivo(ruta_ida[indice_ruta])) {
             nodo_cargado = true;
-            distanciaAnterior = TinyGPSPlus::distanceBetween(gps.location.lat(), gps.location.lng(), lat_objetivo, lon_objetivo);
+            distanciaAnterior = TinyGPSPlus::distanceBetween(
+              gps.location.lat(), gps.location.lng(), lat_objetivo, lon_objetivo);
             ultimoCalculoVelocidad = millis();
+            tUltimoDatoVivo = millis(); // la lectura de archivo tomó tiempo
           }
         } else {
-          apagarBuzzer();
+          estadoActual = RUTA_FINALIZADA;
           Serial.println("¡Ruta finalizada!");
-          while(true) { yield(); } 
         }
+        break;
       }
 
-      if (nodo_cargado && gps.location.isValid()) {
-        double distancia = TinyGPSPlus::distanceBetween(gps.location.lat(), gps.location.lng(), lat_objetivo, lon_objetivo);
-        double rumboObjetivo = TinyGPSPlus::courseTo(gps.location.lat(), gps.location.lng(), lat_objetivo, lon_objetivo);
-        
-        // Brújula digital compensada
-        float rumboActual = mpu.getYaw(); 
-        
-        // Calcular error de rumbo (-180 a 180 grados)
-        float errorRumbo = rumboObjetivo - rumboActual;
-        if (errorRumbo > 180) errorRumbo -= 360;
-        if (errorRumbo < -180) errorRumbo += 360;
+      if (gps.location.isValid()) {
+        double distancia = TinyGPSPlus::distanceBetween(
+          gps.location.lat(), gps.location.lng(), lat_objetivo, lon_objetivo);
+        double rumboObjetivo = TinyGPSPlus::courseTo(
+          gps.location.lat(), gps.location.lng(), lat_objetivo, lon_objetivo);
+        float rumbo = rumboActual();
 
-        // Línea de depuración para el Monitor Serie
-        Serial.printf("Dist: %.2fm | Rumbo Obj: %.1f° | MPU: %.1f° | Error: %.1f°\n", distancia, rumboObjetivo, rumboActual, errorRumbo);
+        float errorRumbo = normalizar180((float)rumboObjetivo - rumbo);
 
-        // Feedback Auditivo Dinámico basado en ritmos (cada 600ms)
-        if (millis() - ultimoBip > 600) {
-          if (errorRumbo < -20) {
-            // Corrección IZQUIERDA: Dos bips rápidos
-            encenderBuzzer(); delay(50); apagarBuzzer(); delay(50);
-            encenderBuzzer(); delay(50); apagarBuzzer();
-            ultimoBip = millis();
-          } else if (errorRumbo > 20) {
-            // Corrección DERECHA: Un bip largo
-            encenderBuzzer(); delay(300); apagarBuzzer();
-            ultimoBip = millis();
-          } else {
-            // ADELANTE (En curso): Silencio
-            apagarBuzzer();
-          }
+        // Telemetría limitada a 2 veces por segundo
+        if (millis() - ultimoPrint > 500) {
+          ultimoPrint = millis();
+          Serial.printf("Dist: %.2fm | Obj: %.1f | Rumbo: %.1f | Off: %.1f | Err: %.1f\n",
+                        distancia, rumboObjetivo, rumbo, offsetMag, errorRumbo);
         }
 
-        // Evaluar si se alcanzó el nodo
+        // Feedback auditivo: decisión cada 600 ms, sin delays
+        if (millis() - ultimoBip > 600 && !patronActivo) {
+          if (errorRumbo < -20)      iniciarPatron(PAT_IZQ, 3);
+          else if (errorRumbo > 20)  iniciarPatron(PAT_DER, 1);
+          ultimoBip = millis();
+        }
+
+        // Nodo alcanzado
         if (distancia < UMBRAL_DISTANCIA) {
           Serial.println("¡Nodo alcanzado!");
-          // Patrón de éxito: 3 bips asimétricos
-          encenderBuzzer(); delay(100); apagarBuzzer(); delay(100);
-          encenderBuzzer(); delay(100); apagarBuzzer(); delay(100);
-          encenderBuzzer(); delay(400); apagarBuzzer(); 
-          
+          iniciarPatron(PAT_EXITO, 5); // no bloqueante
           indice_ruta++;
-          nodo_cargado = false; 
+          nodo_cargado = false;
         }
 
-        // Sistema de seguridad: Detección de paro
+        // Detección de paro
         if (millis() - ultimoCalculoVelocidad > 3000) {
-          double velocidad = (distanciaAnterior - distancia) / 3.0; // m/s
+          double velocidad = (distanciaAnterior - distancia) / 3.0;
           if (velocidad < 0.2 && distancia > UMBRAL_DISTANCIA) {
             Serial.println("Alerta: Baja velocidad detectada.");
           }
@@ -216,6 +395,13 @@ void loop() {
           ultimoCalculoVelocidad = millis();
         }
       }
+      break;
+
+    case RUTA_FINALIZADA:
+      // No bloquea: el Bluetooth y el buzzer siguen atendidos
+      break;
+
+    default:
       break;
   }
 }
