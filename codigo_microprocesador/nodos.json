@@ -1,0 +1,22 @@
+{
+  "nodos": [
+    {
+      "id": 1,
+      "nombre": "Entrada Polideportivo",
+      "lat": 13.720234,
+      "lon": -89.202182
+    },
+    {
+      "id": 2,
+      "nombre": "Interseccion Biblioteca",
+      "lat": 13.720500,
+      "lon": -89.202500
+    },
+    {
+      "id": 3,
+      "nombre": "Aulas B",
+      "lat": 13.720850,
+      "lon": -89.202100
+    }
+  ]
+}

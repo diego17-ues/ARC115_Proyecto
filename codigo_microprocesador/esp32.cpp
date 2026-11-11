@@ -32,6 +32,8 @@ EstadoSistema estadoActual = INICIANDO;
 const int ruta_ida[] = {1, 2, 3};
 const int total_nodos_ida = sizeof(ruta_ida) / sizeof(ruta_ida[0]);
 int indice_ruta = 0;
+double latNodoAnterior = 0.0, lonNodoAnterior = 0.0;
+bool hayNodoAnterior = false;
 
 double lat_objetivo = 0.0;
 double lon_objetivo = 0.0;
@@ -345,7 +347,19 @@ void loop() {
             distanciaAnterior = TinyGPSPlus::distanceBetween(
               gps.location.lat(), gps.location.lng(), lat_objetivo, lon_objetivo);
             ultimoCalculoVelocidad = millis();
-            tUltimoDatoVivo = millis(); // la lectura de archivo tomó tiempo
+            tUltimoDatoVivo = millis();
+
+            // Diagnóstico de datos
+            Serial.printf("[DIAG] Nodo %d: %.6f, %.6f | desde tu posicion: %.1f m\n",
+                          ruta_ida[indice_ruta], lat_objetivo, lon_objetivo, distanciaAnterior);
+            if (hayNodoAnterior) {
+              double dEntre = TinyGPSPlus::distanceBetween(
+                latNodoAnterior, lonNodoAnterior, lat_objetivo, lon_objetivo);
+              Serial.printf("[DIAG] Distancia entre nodo anterior y este: %.1f m\n", dEntre);
+            }
+            latNodoAnterior = lat_objetivo;
+            lonNodoAnterior = lon_objetivo;
+            hayNodoAnterior = true;
           }
         } else {
           estadoActual = RUTA_FINALIZADA;
@@ -364,10 +378,16 @@ void loop() {
         float errorRumbo = normalizar180((float)rumboObjetivo - rumbo);
 
         // Telemetría limitada a 2 veces por segundo
-        if (millis() - ultimoPrint > 500) {
+        if (millis() - ultimoPrint > 2000) {
           ultimoPrint = millis();
-          Serial.printf("Dist: %.2fm | Obj: %.1f | Rumbo: %.1f | Off: %.1f | Err: %.1f\n",
-                        distancia, rumboObjetivo, rumbo, offsetMag, errorRumbo);
+          Serial.printf("Faltan %.1f m | Sat: %d | HDOP: %.1f | Pos: %.6f, %.6f\n",
+                        distancia, (int)gps.satellites.value(), gps.hdop.hdop(),
+                        gps.location.lat(), gps.location.lng());
+          Serial.printf("   Rumbo obj: %.1f | Rumbo: %.1f | Err: %.1f | Off: %.1f\n",
+                        rumboObjetivo, rumbo, errorRumbo, offsetMag);
+          if (gps.satellites.value() < 5 || gps.hdop.hdop() > 2.5) {
+            Serial.println("   AVISO: GPS impreciso, la distancia puede no ser confiable");
+          }
         }
 
         // Feedback auditivo: decisión cada 600 ms, sin delays
