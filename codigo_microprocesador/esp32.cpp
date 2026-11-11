@@ -54,6 +54,13 @@ float filtroSx = 0.0f, filtroSy = 0.0f;
 bool filtroInicializado = false;
 float offsetMag = 0.0f;
 
+// --- Modo App (Bluetooth) ---
+char estadoGuia = 'A';              // L, R o A
+unsigned long ultimoMensajeApp = 0;
+unsigned long ultimoEnvioRumbo = 0;
+char bufferBT[8];
+uint8_t bufferBTlen = 0;
+
 // =====================================================================
 //  BUZZER NO BLOQUEANTE (Low Level Trigger)
 // =====================================================================
@@ -61,10 +68,12 @@ void encenderBuzzer() { digitalWrite(BUZZER_PIN, LOW); }
 void apagarBuzzer()   { digitalWrite(BUZZER_PIN, HIGH); }
 
 // Patrones: duraciones en ms, alternando ON, OFF, ON, OFF...
-const uint16_t PAT_GPS[]   = {50};
-const uint16_t PAT_IZQ[]   = {50, 50, 50};
-const uint16_t PAT_DER[]   = {300};
-const uint16_t PAT_EXITO[] = {100, 100, 100, 100, 400};
+const uint16_t PAT_GPS[]    = {50};
+const uint16_t PAT_IZQ[]    = {50, 50, 50};
+const uint16_t PAT_DER[]    = {300};
+const uint16_t PAT_EXITO[]  = {100, 100, 100, 100, 400};
+const uint16_t PAT_FINAL[]  = {150, 100, 150, 100, 150, 100, 700}; // 3 cortos + 1 largo
+const uint16_t PAT_ALERTA[] = {80, 80, 80, 80, 80};                // 3 muy rápidos
 
 const uint16_t* patronActual = nullptr;
 uint8_t patronLen = 0;
@@ -100,6 +109,45 @@ void actualizarBuzzer() {
       apagarBuzzer();
     }
   }
+}
+
+// =====================================================================
+//  COMANDOS DEL TELÉFONO (BLUETOOTH)
+// =====================================================================
+bool procesarComando(char c) {
+  switch (c) {
+    case 'L': case 'R': case 'A':
+      estadoGuia = c;
+      return true;
+    case 'N':
+      iniciarPatron(PAT_EXITO, 5);
+      return true;
+    case 'F':
+      iniciarPatron(PAT_FINAL, 7);
+      estadoGuia = 'A';
+      return true;
+    case 'H': // solo latido
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Lee sin bloquear. Devuelve true si llegó algún comando válido.
+bool leerComandosBT() {
+  bool hubo = false;
+  while (SerialBT.available()) {
+    char c = SerialBT.read();
+    if (c == '\n' || c == '\r') {
+      if (bufferBTlen > 0) {
+        if (procesarComando(bufferBT[0])) hubo = true;
+        bufferBTlen = 0;
+      }
+    } else if (bufferBTlen < sizeof(bufferBT) - 1) {
+      bufferBT[bufferBTlen++] = c;
+    }
+  }
+  return hubo;
 }
 
 // =====================================================================
@@ -247,6 +295,7 @@ bool iniciarMPU() {
   mpu.setMagneticDeclination(-1.0); // aproximado para San Salvador, verifica en NOAA
   return true;
 }
+
 // =====================================================================
 //  SETUP
 // =====================================================================
@@ -270,7 +319,7 @@ void setup() {
   }
 
   SerialBT.begin("Navegador_UES");
-  SerialBT.setTimeout(20); // evita bloqueo de readStringUntil
+  SerialBT.setTimeout(20);
 
   // Pitido inicial (en setup el delay es inofensivo)
   encenderBuzzer(); delay(500); apagarBuzzer();
@@ -314,7 +363,16 @@ void loop() {
   // 3. Buzzer no bloqueante
   actualizarBuzzer();
 
-  // 4. Estados
+  // 4. Comandos del teléfono (cualquier comando válido activa el modo app)
+  if (leerComandosBT()) {
+    ultimoMensajeApp = millis();
+    if (estadoActual != MODO_APP) {
+      estadoActual = MODO_APP;
+      Serial.println("Modo APP activado");
+    }
+  }
+
+  // 5. Estados
   switch (estadoActual) {
 
     case ESPERANDO_GPS:
@@ -326,14 +384,30 @@ void loop() {
       if (gps.location.isValid() && gps.location.isUpdated()) {
         detenerPatron();
         Serial.println("¡Fix GPS obtenido!");
-        estadoActual = SerialBT.hasClient() ? MODO_APP : MODO_RUTA_DEFECTO;
+        estadoActual = MODO_RUTA_DEFECTO; // el modo app se activa solo al recibir comandos
       }
       break;
 
     case MODO_APP:
-      if (SerialBT.available()) {
-        String comando = SerialBT.readStringUntil('\n');
-        Serial.print("App dice: "); Serial.println(comando);
+      // 1. Enviar rumbo al teléfono (10 Hz)
+      if (SerialBT.hasClient() && millis() - ultimoEnvioRumbo >= 100) {
+        ultimoEnvioRumbo = millis();
+        SerialBT.printf("Y,%.1f,%.1f\n", rumboMagnetico(), mpu.getGyroZ());
+      }
+
+      // 2. Pitidos de guía según el último estado recibido
+      if (millis() - ultimoBip > 600 && !patronActivo) {
+        if (estadoGuia == 'L')      iniciarPatron(PAT_IZQ, 3);
+        else if (estadoGuia == 'R') iniciarPatron(PAT_DER, 1);
+        ultimoBip = millis();
+      }
+
+      // 3. Seguridad: sin conexión o sin latido -> alerta y respaldo con GPS propio
+      if (!SerialBT.hasClient() || millis() - ultimoMensajeApp > 3000) {
+        Serial.println("APP sin respuesta: volviendo a modo GPS propio");
+        iniciarPatron(PAT_ALERTA, 5);
+        estadoGuia = 'A';
+        estadoActual = gps.location.isValid() ? MODO_RUTA_DEFECTO : ESPERANDO_GPS;
       }
       break;
 
@@ -377,7 +451,7 @@ void loop() {
 
         float errorRumbo = normalizar180((float)rumboObjetivo - rumbo);
 
-        // Telemetría limitada a 2 veces por segundo
+        // Telemetría cada 2 s
         if (millis() - ultimoPrint > 2000) {
           ultimoPrint = millis();
           Serial.printf("Faltan %.1f m | Sat: %d | HDOP: %.1f | Pos: %.6f, %.6f\n",
