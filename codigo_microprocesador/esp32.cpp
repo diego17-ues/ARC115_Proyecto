@@ -174,6 +174,9 @@ void loop() {
         if (errorRumbo > 180) errorRumbo -= 360;
         if (errorRumbo < -180) errorRumbo += 360;
 
+        // Línea de depuración para el Monitor Serie
+        Serial.printf("Dist: %.2fm | Rumbo Obj: %.1f° | MPU: %.1f° | Error: %.1f°\n", distancia, rumboObjetivo, rumboActual, errorRumbo);
+
         // Feedback Auditivo Dinámico basado en ritmos (cada 600ms)
         if (millis() - ultimoBip > 600) {
           if (errorRumbo < -20) {
