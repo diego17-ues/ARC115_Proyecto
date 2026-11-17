@@ -1,4 +1,5 @@
 # EcoGuía
+https://www.youtube.com/watch?v=rLsQrRdL5t0
 
 
 EcoGuía es un prototipo de bajo costo que orienta a personas con discapacidad visual por rutas predefinidas dentro del campus de la Universidad de El Salvador. El sistema está formado por un dispositivo portátil basado en ESP32 y una aplicación Android que actúa como fuente principal de navegación.
