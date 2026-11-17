@@ -90,9 +90,10 @@ Las pruebas unitarias cubren la fórmula de Haversine, los umbrales de direcció
 - No detecta obstáculos en tiempo real; los obstáculos son puntos registrados en la ruta.
 
 ## Autores
-
-[Nombres del equipo] — UES, [carrera].
+Diego Edgardo González Sánchez - GS24026 
+Iván Steven Rivas Solano - RS22042
+Kevin Edenilson Cruz Segura - CS23027
 
 ## Licencia
 
-Producto bajo licencia de la cátedra de Arquitectura de Computadoras 
+Producto bajo licencia de la cátedra de Arquitectura de Computadoras, ARC115 2026. Todos los derechos reservados.
