@@ -8,13 +8,13 @@
 // CONFIGURACIÓN: CAMBIAR ESTOS DATOS
 // =====================================================
 
-const char* WIFI_SSID = "NOMBRE DE RED";
-const char* WIFI_PASSWORD = "CONTRASEÑA DE RED";
+const char* WIFI_SSID = "Iphone de 17";
+const char* WIFI_PASSWORD = "mat315lamejormate";
 
 // IP de la computadora que ejecuta FastAPI.
-const char* API_URL = "http://192.10.20.3:8000"; //Ejemplo//
+const char* API_URL = "http://172.20.10.4:8000"; //Ejemplo//
 // Debe coincidir con MAPA_API_KEY del servidor.
-const char* API_KEY = "contraseña_api"; // a su elección//
+const char* API_KEY = "karen777"; // a su elección//
 
 // GPS TX -> GPIO16 del ESP32.
 // GPS RX -> GPIO17 del ESP32, opcional.
